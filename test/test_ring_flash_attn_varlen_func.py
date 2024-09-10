@@ -41,10 +41,17 @@ def extract_local(value, cu_seqlens, rank, world_size):
 
 def extract_lse(lse, cu_seqlens):
     values = []
-    for i in range(len(cu_seqlens) - 1):
-        start, end = cu_seqlens[i], cu_seqlens[i + 1]
-        value = lse[i, :, : end - start]
-        values.append(value)
+    if lse.dim() == 2:
+        for i in range(len(cu_seqlens) - 1):
+            start, end = cu_seqlens[i], cu_seqlens[i + 1]
+            value = lse[:, start:end]
+            values.append(value)
+    else:
+        assert lse.dim() == 3
+        for i in range(len(cu_seqlens) - 1):
+            start, end = cu_seqlens[i], cu_seqlens[i + 1]
+            value = lse[i, :, : end - start]
+            values.append(value)
     return values
 
 
@@ -99,7 +106,6 @@ if __name__ == "__main__":
         dropout_p=dropout_p,
         causal=causal,
         window_size=(-1, -1),
-        softcap=0.0,
         alibi_slopes=None,
         deterministic=deterministic,
         return_attn_probs=True,
@@ -115,7 +121,6 @@ if __name__ == "__main__":
         dropout_p=dropout_p,
         causal=causal,
         window_size=(-1, -1),
-        softcap=0.0,
         alibi_slopes=None,
         deterministic=deterministic,
         return_attn_probs=True,

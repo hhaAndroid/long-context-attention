@@ -1,0 +1,5 @@
+这个工程没有适配最新的 flash attention，但是 ring attention repo 里面适配了。
+
+- 将 yunchang/ring 里面的文件全部换成 https://github.com/hhaAndroid/ring-flash-attention 中的
+- 测试脚本里面的 extract_lse 需要换成最新的
+

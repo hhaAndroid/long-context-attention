@@ -36,6 +36,7 @@ if __name__ == "__main__":
     dist.init_process_group("nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    print(world_size)
     dtype = torch.bfloat16
     device = torch.device(f"cuda:{rank}")
 
@@ -73,7 +74,6 @@ if __name__ == "__main__":
         dropout_p=dropout_p,
         causal=causal,
         window_size=(-1, -1),
-        softcap=0.0,
         alibi_slopes=None,
         deterministic=deterministic,
         return_attn_probs=True,
@@ -89,7 +89,6 @@ if __name__ == "__main__":
         dropout_p=dropout_p,
         causal=causal,
         window_size=(-1, -1),
-        softcap=0.0,
         alibi_slopes=None,
         deterministic=deterministic,
         return_attn_probs=True,
