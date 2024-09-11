@@ -67,7 +67,7 @@ def llama3_flash_attn_varlen_forward(
     out_list = []
     lse_list = []
 
-    nheads = q.shape[1]
+    nheads = q.shape[1]  # sub_n,h,d
     total_k, nheads_k, head_dim = k.shape
     assert nheads_k % heads_k_stride == 0
 
@@ -78,14 +78,18 @@ def llama3_flash_attn_varlen_forward(
         device=k.device,
     )
 
-    for i in range(0, nheads_k, heads_k_stride):
+    for i in range(0, nheads_k, heads_k_stride):  # 把 head 切分为多份
+        # sub_n,h,d
+        # 这个代码应该是考虑了 gqa 情况，如果不是 gqa，可以直接用 q[:, i:i+heads_k_stride]
         q_i = q[:, i * nheads // nheads_k : (i + heads_k_stride) * nheads // nheads_k]
         k_i = k[:, i : i + heads_k_stride].contiguous()
         v_i = v[:, i : i + heads_k_stride].contiguous()
 
+        # 序列维度聚合
         dist.all_gather_into_tensor(kv_buffer[0], k_i, group=process_group)
         dist.all_gather_into_tensor(kv_buffer[1], v_i, group=process_group)
 
+        # 重新切片
         k_i = kv_buffer[0][local_k_slice]
         v_i = kv_buffer[1][local_k_slice]
 
