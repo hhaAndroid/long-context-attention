@@ -1,4 +1,4 @@
-from yunchang.comm.all_to_all import SeqAllToAll4D, SeqAllToAll5D
+from ..comm.all_to_all import SeqAllToAll4D, SeqAllToAll5D
 
 import torch
 
@@ -7,8 +7,9 @@ from torch import Tensor
 
 import torch.distributed as dist
 from .utils import RING_IMPL_DICT, RING_IMPL_QKVPACKED_DICT
-from yunchang.globals import PROCESS_GROUP
-from yunchang.ring import llama3_flash_attn_prepare_cu_seqlens, llama3_flash_attn_varlen_func
+from ..globals import PROCESS_GROUP
+from ..ring import llama3_flash_attn_prepare_cu_seqlens, llama3_flash_attn_varlen_func
+from xtuner._lite.parallel import all_to_all
 
 
 class LongContextAttention(torch.nn.Module):
@@ -22,11 +23,11 @@ class LongContextAttention(torch.nn.Module):
     """
 
     def __init__(
-            self,
-            scatter_idx: int = 2,
-            gather_idx: int = 1,
-            ring_impl_type: str = "basic",
-            use_pack_qkv: bool = False,
+        self,
+        scatter_idx: int = 2,
+        gather_idx: int = 1,
+        ring_impl_type: str = "basic",
+        use_pack_qkv: bool = False,
     ) -> None:
 
         super(LongContextAttention, self).__init__()
@@ -35,25 +36,25 @@ class LongContextAttention(torch.nn.Module):
 
         self.use_pack_qkv = use_pack_qkv
         assert (
-                self.ulysses_pg is not None or self.ring_pg is not None
+            self.ulysses_pg is not None or self.ring_pg is not None
         ), f"use set_seq_parallel_pg() first. Now ulysses pg {self.ulysses_pg} and ring pg {self.ring_pg}"
         self.scatter_idx = scatter_idx
         self.gather_idx = gather_idx
         self.ring_attn_fn = RING_IMPL_DICT[ring_impl_type]
 
     def forward(
-            self,
-            query: Tensor,
-            key: Tensor,
-            value: Tensor,
-            dropout_p=0.0,
-            softmax_scale=None,
-            causal=False,
-            window_size=(-1, -1),
-            alibi_slopes=None,
-            deterministic=False,
-            return_attn_probs=False,
-            *args: Any,
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        dropout_p=0.0,
+        softmax_scale=None,
+        causal=False,
+        window_size=(-1, -1),
+        alibi_slopes=None,
+        deterministic=False,
+        return_attn_probs=False,
+        *args: Any,
     ) -> Tensor:
         """forward
 
@@ -141,10 +142,10 @@ class LongContextAttentionQKVPacked(torch.nn.Module):
     """
 
     def __init__(
-            self,
-            scatter_idx: int = 3,
-            gather_idx: int = 1,
-            ring_impl_type: str = "basic",
+        self,
+        scatter_idx: int = 3,
+        gather_idx: int = 1,
+        ring_impl_type: str = "basic",
     ) -> None:
 
         super(LongContextAttentionQKVPacked, self).__init__()
@@ -219,6 +220,80 @@ class LongContextAttentionQKVPacked(torch.nn.Module):
             )
         # out e.g., [s/p::h]
         return out
+
+
+def llama3_varlen_attention_sp_ulysses_ring(
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        cu_seqlens: Tensor,
+        ulysses_pg,
+        ring_pg,
+        dropout_p=0.0,
+        softmax_scale=None,
+        causal=False,
+        window_size=(-1, -1),
+        deterministic=False,
+        heads_k_stride=1,
+):
+    scatter_idx = 1
+    gather_idx = 0
+
+    ulysses_world_size = dist.get_world_size(ulysses_pg)
+    if ulysses_world_size > 1:
+        query = all_to_all(
+            query, ulysses_pg, scatter_idx, gather_idx
+        )
+        key = all_to_all(
+            key, ulysses_pg, scatter_idx, gather_idx
+        )
+        value = all_to_all(
+            value, ulysses_pg, scatter_idx, gather_idx
+        )
+
+    ring_world_size = dist.get_world_size(ring_pg)
+
+    ring_rank = dist.get_rank(ring_pg)
+    (
+        local_cu_seqlens_q,
+        local_cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        local_k_slice,
+    ) = llama3_flash_attn_prepare_cu_seqlens(cu_seqlens, causal, ring_rank, ring_world_size)
+
+    out = llama3_flash_attn_varlen_func(
+        query,
+        key,
+        value,
+        local_cu_seqlens_q,
+        local_cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        heads_k_stride=key.shape[1] if heads_k_stride == -1 else heads_k_stride,
+        local_k_slice=local_k_slice,
+        dropout_p=dropout_p,
+        causal=causal,
+        window_size=(-1, -1),
+        alibi_slopes=None,
+        deterministic=deterministic,
+        return_attn_probs=False,
+        group=ring_pg
+    )
+
+    if type(out) == tuple:
+        context_layer, _, _ = out
+    else:
+        context_layer = out
+
+    if ulysses_world_size > 1:
+        output = all_to_all(
+            context_layer, ulysses_pg, gather_idx, scatter_idx
+        )
+    else:
+        output = context_layer
+    # out e.g., [s/p::h]
+    return output
 
 
 class LongContextVarLenAttentionForLlaMa3(torch.nn.Module):
