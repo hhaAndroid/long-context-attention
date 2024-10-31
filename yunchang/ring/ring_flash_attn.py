@@ -286,3 +286,53 @@ def ring_flash_attn_func(
         return_attn_probs,
         group,
     )
+
+
+@torch.no_grad()
+def ring_flash_attn_inference_func(
+        q,
+        k,
+        v,
+        dropout_p=0.0,
+        softmax_scale=None,
+        causal=False,
+        window_size=(-1, -1),
+        alibi_slopes=None,
+        deterministic=False,
+        return_attn_probs=False,
+        group=None,
+):
+    assert q.shape[1] == 1
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
+    params = get_default_args(_flash_attn_forward).copy()
+    params.update(
+        {
+            "q": q,
+            "k": k,
+            "v": v,
+            "dropout_p": dropout_p,
+            "softmax_scale": softmax_scale,
+            "causal": causal,
+            "window_size": window_size,
+            "alibi_slopes": alibi_slopes,
+            "return_softmax": True and dropout_p > 0,
+        }
+    )
+    out, _, _, _, _, lse, _, _ = _flash_attn_forward(**params)
+    out_list = [
+        torch.empty_like(out, device=out.device, dtype=out.dtype)
+        for _ in range(dist.get_world_size(group))
+    ]
+    dist.all_gather(out_list, out)
+    out_lse = [
+        torch.empty_like(lse, device=lse.device, dtype=lse.dtype)
+        for _ in range(dist.get_world_size(group))
+    ]
+    dist.all_gather(out_lse, lse)
+
+    new_out = None
+    new_lse = None
+    for i in reversed(range(dist.get_world_size(group))):
+        new_out, new_lse = update_out_and_lse(new_out, new_lse, out_list[i], out_lse[i])
+    return new_out.to(q.dtype)

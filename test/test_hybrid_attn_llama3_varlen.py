@@ -2,6 +2,7 @@ import random
 
 from yunchang import (
     LongContextVarLenAttentionForLlaMa3,
+    llama3_varlen_attention_sp_ulysses_ring,
     set_seq_parallel_pg,
 )
 import torch
@@ -66,15 +67,15 @@ if __name__ == "__main__":
 
     # Prepare inputs
     q = torch.randn(
-        batch_size, total_length, nheads, d, device=device, dtype=dtype, requires_grad=True
+        total_length, nheads, d, device=device, dtype=dtype, requires_grad=True
     )
     k = torch.randn(
-        batch_size, total_length, nheads, d, device=device, dtype=dtype, requires_grad=True
+        total_length, nheads, d, device=device, dtype=dtype, requires_grad=True
     )
     v = torch.randn(
-        batch_size, total_length, nheads, d, device=device, dtype=dtype, requires_grad=True
+        total_length, nheads, d, device=device, dtype=dtype, requires_grad=True
     )
-    dout = torch.randn(batch_size, total_length, nheads, d, device=device, dtype=dtype)
+    dout = torch.randn(total_length, nheads, d, device=device, dtype=dtype)
 
     dist.broadcast(q, src=0)
     dist.broadcast(k, src=0)
@@ -87,6 +88,8 @@ if __name__ == "__main__":
         k,
         v,
         cu_seqlens_tensor,
+        cu_seqlens_tensor,
+        max_seqlen,
         max_seqlen,
         dropout_p=dropout_p,
         causal=causal,
@@ -96,35 +99,48 @@ if __name__ == "__main__":
         return_attn_probs=True,
     )
     local_out = out[rank * local_length: (rank + 1) * local_length]
-    local_lse = lse[:, rank * local_length: (rank + 1) * local_length]
 
     # 计算混合 attention
-    local_q = q.chunk(world_size, dim=1)[rank].detach().clone()
+    local_q = q.chunk(world_size, dim=0)[rank].detach().clone()
     local_q.requires_grad = True
-    local_k = k.chunk(world_size, dim=1)[rank].detach().clone()
+    local_k = k.chunk(world_size, dim=0)[rank].detach().clone()
     local_k.requires_grad = True
-    local_v = v.chunk(world_size, dim=1)[rank].detach().clone()
+    local_v = v.chunk(world_size, dim=0)[rank].detach().clone()
     local_v.requires_grad = True
 
-    local_dout = dout.chunk(world_size, dim=1)[rank].detach().clone()
+    local_dout = dout.chunk(world_size, dim=0)[rank].detach().clone()
 
     sp_ulysses_degree = 4
     sp_ring_degree = 2
     set_seq_parallel_pg(sp_ulysses_degree, sp_ring_degree, rank, world_size)
 
-    longcontex = LongContextVarLenAttentionForLlaMa3()
-    local_out2 = longcontex(
+    # longcontex = LongContextVarLenAttentionForLlaMa3()
+    local_out2 = llama3_varlen_attention_sp_ulysses_ring(
         local_q,
         local_k,
         local_v,
         cu_seqlens_tensor,
-        max_seqlen,
         dropout_p=dropout_p,
         causal=causal,
         window_size=(-1, -1),
-        alibi_slopes=None,
-        deterministic=deterministic,
-        return_attn_probs=False,
+        deterministic=deterministic
     )
+    log('out raw', local_out, rank0_only=True)
+    log('out att', local_out2, rank0_only=True)
     log("out diff", local_out - local_out2)
 
+    out.backward(dout)
+    dq = q.grad
+    local_dq = dq[rank * local_length: (rank + 1) * local_length]
+    dk = k.grad
+    local_dk = dk[rank * local_length: (rank + 1) * local_length]
+    dv = v.grad
+    local_dv = dv[rank * local_length: (rank + 1) * local_length]
+
+    local_out2.backward(local_dout)
+    llama3_dq = local_q.grad
+    llama3_dk = local_k.grad
+    llama3_dv = local_v.grad
+    log("dq diff", local_dq - llama3_dq)
+    log("dk diff", local_dk - llama3_dk)
+    log("dv diff", local_dv - llama3_dv)
